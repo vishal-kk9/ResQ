@@ -7,7 +7,7 @@ import json
 import os
 
 # ================== CONFIGURATION ==================
-API_KEY = "AIzaSyAc6mMDW0BWvqYAFtRSTTqYBPbOWMuXDps"
+API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=API_KEY)
 
 # 🛠️ MODEL SELECTOR
@@ -366,3 +366,4 @@ else:
             "Specialty": d["specialty"]
         })
     st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+
