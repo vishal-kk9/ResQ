@@ -65,7 +65,7 @@ class SharedSystemState:
 
     # 🌍 REAL-WORLD HOSPITAL FETCHING
     def fetch_real_hospitals(self, lat, lon):
-        if self.gps_locked: return # Don't spam the API if already locked
+        if self.gps_locked: return 
         
         api = overpy.Overpass()
         query = f"""
@@ -160,15 +160,15 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
     # 1. CHECK IF WE ARE ALREADY ACTIVE (NAVIGATION MODE)
     if system.mission["status"] == "ACTIVE":
         dest_name = system.mission['target_hospital']
-        # SAFETY CHECK: Ensure hospital still exists in current list
+        
         if dest_name in system.hospitals:
             dest_data = system.hospitals[dest_name]
         else:
-            # Fallback if list reset
             dest_data = list(system.hospitals.values())[0]
             dest_name = list(system.hospitals.keys())[0]
 
-        st.markdown(f"# 🚑 CODE 3 TRANSPORT: {dest_name}")
+        # --- UPDATED HEADER HERE (Removed "CODE 3") ---
+        st.markdown(f"# 🚑 EN ROUTE TO: {dest_name}")
         st.success("✅ ADMISSION AUTHORIZED - UNIT MOBILIZED")
         
         c1, c2, c3 = st.columns(3)
@@ -188,7 +188,7 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         
         vc1, vc2, vc3, vc4 = st.columns(4)
         with vc1: new_bp = st.text_input("BP (mmHg)", value=system.mission["live_vitals"]["bp"])
-        # FIXED CRASH HERE: Using safe_int to prevent N/A error
+        # CRASH FIX: Using safe_int
         with vc2: new_hr = st.number_input("Heart Rate (BPM)", value=safe_int(system.mission["live_vitals"]["hr"]))
         with vc3: new_spo2 = st.number_input("SpO2 (%)", value=safe_int(system.mission["live_vitals"]["spo2"]))
         with vc4:
@@ -371,7 +371,7 @@ else:
         st.subheader("📍 INBOUND UNIT TRACKING")
         target_hosp = system.mission["target_hospital"]
         
-        # FIXED: Ensure we fetch the latest data for the selected hospital
+        # Safe lookup for live hospital coordinates
         if target_hosp in system.hospitals:
             h_data = system.hospitals[target_hosp]
         else:
