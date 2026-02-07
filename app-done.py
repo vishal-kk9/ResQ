@@ -5,20 +5,22 @@ import pandas as pd
 import time
 import json
 import os
+import random
+from streamlit_geolocation import streamlit_geolocation # New Library
 
 # ================== CONFIGURATION ==================
-API_KEY = st.secrets["GEMINI_API_KEY"]
+# This reads the key from the secure cloud settings (Fixes the 403 Error)
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    # If running locally without secrets.toml, put your NEW key here temporarily
+    API_KEY = "YOUR_NEW_KEY_HERE" 
+
 genai.configure(api_key=API_KEY)
 
 # 🛠️ MODEL SELECTOR
 @st.cache_resource
 def get_model():
-    model_options = ["gemini-3-flash-preview", "gemini-1.5-flash", "gemini-pro"]
-    for m in model_options:
-        try:
-            model = genai.GenerativeModel(m)
-            return model
-        except: continue
     return genai.GenerativeModel("gemini-pro")
 
 model = get_model()
@@ -27,6 +29,11 @@ model = get_model()
 @st.cache_resource
 class SharedSystemState:
     def __init__(self):
+        # Default: San Francisco (Overwritten if GPS is used)
+        self.base_lat = 37.7749
+        self.base_lon = -122.4194
+        self.gps_locked = False
+        
         self.hospitals = {
             "City General Trauma": {"specialty": "Level 1 Trauma", "dist": 5, "icu_beds": 2, "op_beds": 15, "lat": 37.7749, "lon": -122.4194},
             "Metropolitan Heart": {"specialty": "Cardiology Center", "dist": 12, "icu_beds": 8, "op_beds": 5, "lat": 37.7849, "lon": -122.4094},
@@ -38,7 +45,8 @@ class SharedSystemState:
             "patient_data": None,
             "ai_analysis": None,
             "live_vitals": {"bp": "120/80", "hr": 80, "spo2": 98},
-            "telemetry_alert": "Stable" # New field for re-evaluation
+            "telemetry_alert": "Stable",
+            "ambulance_loc": {"lat": 37.7600, "lon": -122.4200} 
         }
         self.declined_hospitals = []
 
@@ -47,6 +55,19 @@ class SharedSystemState:
             self.hospitals[hospital_name]["icu_beds"] -= 1
         else:
             self.hospitals[hospital_name]["op_beds"] -= 1
+            
+    # Relocate hospitals to be near the user's real GPS
+    def relocate_hospitals(self, user_lat, user_lon):
+        if not self.gps_locked:
+            self.base_lat = user_lat
+            self.base_lon = user_lon
+            # Move hospitals to random spots around the user (approx 2-5km away)
+            offsets = [(0.02, 0.01), (-0.02, -0.02), (0.01, -0.03)]
+            keys = list(self.hospitals.keys())
+            for i, key in enumerate(keys):
+                self.hospitals[key]["lat"] = user_lat + offsets[i][0]
+                self.hospitals[key]["lon"] = user_lon + offsets[i][1]
+            self.gps_locked = True
 
 system = SharedSystemState()
 
@@ -66,11 +87,10 @@ st.markdown("""
 <style>
     .stButton>button { width: 100%; border-radius: 8px; height: 3em; font-weight: bold; }
     div[data-testid="stMetricValue"] { font-size: 2.2rem; }
-    .reportview-container .main .block-container{ padding-top: 2rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR WITH LOGO ---
+# --- SIDEBAR ---
 with st.sidebar:
     if os.path.exists("resq_logo.jpeg"):
         st.image("resq_logo.jpeg", use_container_width=True)
@@ -79,7 +99,13 @@ with st.sidebar:
 
     st.divider()
     st.header("📡 SYSTEM STATUS")
-    st.success("🟢 NETWORK ONLINE")
+    
+    # --- 🛰️ GPS STATUS ---
+    if system.gps_locked:
+        st.success("🟢 GPS SIGNAL: LOCKED")
+        st.caption(f"Lat: {system.base_lat:.4f}, Lon: {system.base_lon:.4f}")
+    else:
+        st.warning("🟠 GPS: SEARCHING...")
     
     st.divider()
     page = st.radio("SELECT INTERFACE", ["🚑 EMS UNIT (AMBULANCE)", "🏥 MEDICAL COMMAND (HOSPITAL)"])
@@ -118,17 +144,16 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         c2.metric("RANGE", f"{dest_data['dist']} km")
         c3.metric("STATUS", "EN ROUTE")
 
+        # --- 🗺️ LIVE GPS MAP ---
+        st.subheader("📍 LIVE GPS TRACKING")
         map_data = pd.DataFrame([
-            {"lat": 37.7649, "lon": -122.4294, "color": "#ff0000"}, 
-            {"lat": dest_data['lat'], "lon": dest_data['lon'], "color": "#00ff00"} 
+            {"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "type": "🚑 AMBULANCE", "size": 20, "color": "#ff0000"}, 
+            {"lat": dest_data['lat'], "lon": dest_data['lon'], "type": "🏥 HOSPITAL", "size": 20, "color": "#00ff00"} 
         ])
-        st.map(map_data, zoom=12, color="color")
+        st.map(map_data, latitude="lat", longitude="lon", size="size", color="color", zoom=13)
 
         st.divider()
-        
-        # --- 🔴 LIVE TELEMETRY & RE-EVALUATION ---
         st.subheader("📡 LIVE PATIENT TELEMETRY")
-        st.caption("Update vitals for Real-Time AI Re-evaluation")
         
         vc1, vc2, vc3, vc4 = st.columns(4)
         with vc1:
@@ -141,18 +166,12 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
             st.write("") 
             st.write("") 
             if st.button("📡 TRANSMIT & RE-EVALUATE"):
-                # 1. Update Vitals
                 system.mission["live_vitals"] = {"bp": new_bp, "hr": new_hr, "spo2": new_spo2}
-                
-                # 2. Trigger AI Re-check
                 with st.spinner("AI Analyzing New Vitals..."):
                     prompt = f"""
-                    Patient Re-evaluation.
-                    Previous Status: {system.mission['ai_analysis']['reason']}
+                    Patient Re-evaluation. Previous Status: {system.mission['ai_analysis']['reason']}
                     NEW VITALS: BP {new_bp}, HR {new_hr}, SpO2 {new_spo2}.
-                    
                     Task: Provide a 1-sentence status update for the receiving doctor.
-                    Examples: "Patient stabilizing.", "CRITICAL: Vitals deteriorating, prepare crash cart."
                     """
                     try:
                         resp = model.generate_content(prompt)
@@ -162,7 +181,6 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                     except:
                         st.error("AI Re-evaluation failed.")
         
-        # Display Current Alert
         if system.mission["telemetry_alert"] != "Stable":
              st.info(f"**AI LIVE MONITOR:** {system.mission['telemetry_alert']}")
 
@@ -177,7 +195,6 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
     elif system.mission["status"] == "DECLINED":
         st.title("❌ ADMISSION DENIED: DIVERSION REQUIRED")
         st.error(f"{system.mission['target_hospital']} reports ZERO CAPACITY. Initiate Diversion Protocol.")
-        
         if st.button("🔄 INITIATE DIVERSION (SELECT ALTERNATE)", type="primary"):
             system.mission["status"] = "IDLE"
             st.rerun()
@@ -185,8 +202,27 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
     # --- STATE 4: TRIAGE ---
     else:
         st.title("🚑 ResQ PRE-HOSPITAL ASSESSMENT")
-        st.caption("AI-Assisted Clinical Triage & Resource Allocation")
+        
+        # --- 🛰️ GEOLOCATION BUTTON ---
+        col_gps, col_info = st.columns([1, 2])
+        with col_gps:
+            st.caption("📍 ACQUIRE SATELLITE FIX")
+            location = streamlit_geolocation()
+            
+            # If GPS found, update system coordinates
+            if location and location['latitude'] is not None:
+                if not system.gps_locked:
+                    system.relocate_hospitals(location['latitude'], location['longitude'])
+                    system.mission["ambulance_loc"] = {"lat": location['latitude'], "lon": location['longitude']}
+                    st.rerun()
+        
+        with col_info:
+            if system.gps_locked:
+                 st.success(f"✅ LOCATION CONFIRMED: {system.base_lat:.4f}, {system.base_lon:.4f}")
+            else:
+                 st.info("⚠️ Using Default Triangulation (San Francisco). Click above for Real GPS.")
 
+        st.divider()
         c1, c2 = st.columns([1, 2])
         with c1:
             pid = st.text_input("SCAN PATIENT ID / QR (Optional)", placeholder="Enter ID if available")
@@ -203,12 +239,18 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                 patient = None
 
         st.divider()
-        notes = st.text_area("🎙️ CLINICAL NOTES / VITALS", height=100, placeholder="e.g., Tachycardia 120bpm, BP 180/110, diaphoresis...")
+        st.subheader("📊 VITAL SIGNS MONITOR")
+        v1, v2, v3 = st.columns(3)
+        with v1: bp_input = st.text_input("Blood Pressure", placeholder="120/80")
+        with v2: hr_input = st.number_input("Heart Rate (BPM)", value=0)
+        with v3: spo2_input = st.number_input("SpO2 (%)", value=0)
+            
+        st.divider()
+        notes = st.text_area("🎙️ CLINICAL NOTES / OBSERVATIONS", height=100, placeholder="e.g., Diaphoresis, chest pain radiating to left arm...")
         
         col_act, col_upl = st.columns([1,1])
         with col_upl:
             st.file_uploader("📸 UPLOAD TRAUMA IMAGING", type=["jpg", "png"], label_visibility="collapsed")
-        
         with col_act:
             analyze_btn = st.button("⚡ EXECUTE CLINICAL DIAGNOSTICS", type="primary")
 
@@ -218,21 +260,19 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
             else:
                 system.declined_hospitals = []
                 patient_data_str = str(patient) if patient else "UNIDENTIFIED PATIENT / UNKNOWN HISTORY"
+                system.mission["live_vitals"] = {
+                    "bp": bp_input if bp_input else "N/A",
+                    "hr": hr_input if hr_input > 0 else "N/A",
+                    "spo2": spo2_input if spo2_input > 0 else "N/A"
+                }
 
                 with st.spinner("🤖 PROCESSING BIOMETRICS..."):
                     prompt = f"""
                     Act as an Expert Trauma Triage AI.
                     Patient Data: {patient_data_str}
+                    Vitals: BP {bp_input}, HR {hr_input}, SpO2 {spo2_input}
                     Clinical Notes: {notes}
-                    
-                    Task:
-                    1. Calculate Severity Score (1-10).
-                    2. Determine Ward Need: "ICU" (Score > 7) or "OP" (Score <= 7).
-                    3. Write a Comprehensive Clinical Assessment (approx 40-50 words). Include:
-                       - Suspected Diagnosis
-                       - Immediate Risk Factors
-                       - Recommended Stabilization Actions.
-                    
+                    Task: Severity Score (1-10), Ward Need (ICU/OP), Assessment (40 words).
                     Return strict JSON: {{ "severity": int, "ward_need": "str", "reason": "str" }}
                     """
                     try:
@@ -249,24 +289,26 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
             r = st.session_state.analysis_result
             st.divider()
             st.markdown("### 🤖 CLINICAL ACUITY REPORT")
-            
             c1, c2 = st.columns([1, 2])
             sev = r['severity']
             color = "red" if sev > 7 else "orange" if sev > 4 else "green"
-            
             with c1:
-                st.markdown(f"**SEVERITY INDEX**")
-                st.markdown(f":{color}[**{sev}/10**]")
+                st.markdown(f"**SEVERITY INDEX**: :{color}[**{sev}/10**]")
                 st.metric("REQUIRED UNIT", r['ward_need'])
-            
             with c2:
                 st.info(f"**AI ASSESSMENT:**\n\n{r['reason']}", icon="🩺")
             
-            st.markdown("### 🏥 AVAILABLE FACILITIES")
+            st.markdown("### 🏥 AVAILABLE FACILITIES (NEARBY)")
             hospitals = find_best_hospital(r["ward_need"])
             
-            if not hospitals:
-                st.error("🚨 CRITICAL: NO CAPACITY IN NETWORK")
+            # --- 🗺️ SHOW HOSPITALS ON MAP (RELATIVE TO USER) ---
+            map_pts = []
+            map_pts.append({"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "color": "#ff0000", "size": 20})
+            for name, data in hospitals:
+                 map_pts.append({"lat": data["lat"], "lon": data["lon"], "color": "#0000ff", "size": 15})
+            st.map(pd.DataFrame(map_pts), color="color", size="size", zoom=12)
+
+            if not hospitals: st.error("🚨 CRITICAL: NO CAPACITY IN NETWORK")
             
             for name, data in hospitals:
                 with st.container():
@@ -274,12 +316,11 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                     with col_det:
                         st.markdown(f"**{name}**")
                         st.caption(f"🚗 {data['dist']}km | {r['ward_need']} Capacity: {data['icu_beds'] if r['ward_need']=='ICU' else data['op_beds']}")
-                    
                     with col_btn:
                         if name in system.declined_hospitals:
-                            st.button(f"⛔ ADMISSION REFUSED", key=name, disabled=True)
+                            st.button(f"⛔ REFUSED", key=name, disabled=True)
                         else:
-                            if st.button(f"🚑 REQUEST IMMEDIATE ADMISSION", key=name):
+                            if st.button(f"🚑 REQUEST ADMISSION", key=name):
                                 system.mission["status"] = "PENDING"
                                 system.mission["target_hospital"] = name
                                 system.mission["patient_data"] = patient if patient else {"name": "Unidentified", "age": "Unknown"}
@@ -291,45 +332,45 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
 else:
     st.title("🏥 MEDICAL COMMAND CENTER")
     
-    # --- ACTIVE MISSION DASHBOARD ---
     if system.mission["status"] == "ACTIVE":
         st.success(f"🚑 ACTIVE INBOUND: {system.mission['patient_data']['name'].upper()}")
-        
-        # --- 🔴 LIVE TELEMETRY DISPLAY ---
-        st.subheader("📡 LIVE PATIENT TELEMETRY (REAL-TIME)")
-        
-        # Display the AI Update Message prominently
+        st.subheader("📍 INBOUND UNIT TRACKING")
+        target_hosp = system.mission["target_hospital"]
+        h_data = system.hospitals[target_hosp]
+        map_data = pd.DataFrame([
+            {"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "type": "🚑 UNIT", "size": 20, "color": "#ff0000"}, 
+            {"lat": h_data['lat'], "lon": h_data['lon'], "type": "🏥 HOSPITAL", "size": 20, "color": "#00ff00"} 
+        ])
+        st.map(map_data, latitude="lat", longitude="lon", size="size", color="color", zoom=13)
+
+        st.subheader("📡 LIVE VITALS")
         if system.mission.get("telemetry_alert") and system.mission["telemetry_alert"] != "Stable":
              st.warning(f"**🔔 UPDATE FROM UNIT:** {system.mission['telemetry_alert']}")
 
         vitals = system.mission["live_vitals"]
-        
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Blood Pressure", vitals['bp'])
-        m2.metric("Heart Rate", f"{vitals['hr']} bpm", delta_color="inverse")
+        m1.metric("BP", vitals['bp'])
+        m2.metric("HR", f"{vitals['hr']} bpm", delta_color="inverse")
         m3.metric("SpO2", f"{vitals['spo2']}%")
         m4.metric("Severity", f"{system.mission['ai_analysis']['severity']}/10")
-        
         st.divider()
 
-    # --- INCOMING REQUEST ---
     elif system.mission["status"] == "PENDING":
         st.error("🚨 INCOMING PRIORITY TRANSFER REQUEST")
-        
         alert = system.mission
         patient = alert["patient_data"]
         analysis = alert["ai_analysis"]
         target = alert["target_hospital"]
+        vitals = alert.get("live_vitals", {"bp": "N/A", "hr": "N/A", "spo2": "N/A"})
 
         st.markdown(f"### 🚑 Unit Requesting Admission to: **{target}**")
-        
         c1, c2 = st.columns(2)
         with c1:
             st.write(f"**Patient:** {patient['name']} ({patient['age']})")
             st.info(f"**Clinical Indication:**\n{analysis['reason']}") 
         with c2:
             st.metric("Acuity Score", f"{analysis['severity']}/10")
-            st.metric("Unit Required", analysis['ward_need'])
+            st.caption(f"Initial Vitals: BP {vitals['bp']} | HR {vitals['hr']} | SpO2 {vitals['spo2']}")
 
         b1, b2 = st.columns(2)
         with b1:
@@ -342,15 +383,11 @@ else:
                 system.declined_hospitals.append(target)
                 system.mission["status"] = "DECLINED"
                 st.rerun()
-        
         st.divider()
 
-    # --- DASHBOARD ---
     st.caption("Live Bed Census & Transport Tracking")
-    
     total_icu = sum(h["icu_beds"] for h in system.hospitals.values())
     total_op = sum(h["op_beds"] for h in system.hospitals.values())
-    
     m1, m2, m3 = st.columns(3)
     m1.metric("ICU Capacity", total_icu)
     m2.metric("General Capacity", total_op)
@@ -359,11 +396,5 @@ else:
     st.subheader("📊 Network Census Board")
     table = []
     for h, d in system.hospitals.items():
-        table.append({
-            "Facility Name": h,
-            "ICU Vacancy": d["icu_beds"],
-            "Gen Ward Vacancy": d["op_beds"],
-            "Specialty": d["specialty"]
-        })
+        table.append({"Facility Name": h, "ICU Vacancy": d["icu_beds"], "Gen Ward Vacancy": d["op_beds"], "Specialty": d["specialty"]})
     st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
-
