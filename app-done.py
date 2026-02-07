@@ -11,42 +11,30 @@ import overpy
 from geopy.distance import geodesic
 
 # ================== CONFIGURATION ==================
+# 1. SETUP API KEY (Safe for both Cloud and Local)
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    API_KEY = "YOUR_NEW_KEY_HERE" 
+    # Fallback if you are running locally and haven't set up secrets.toml
+    # You can paste your key here for local testing if needed
+    API_KEY = "PASTE_YOUR_KEY_HERE_IF_LOCAL" 
 
 genai.configure(api_key=API_KEY)
 
-# 🛠️ ROBUST MODEL SELECTOR (THE FIX)
+# 🛠️ MODEL SELECTOR (YOUR CUSTOM CODE)
 @st.cache_resource
-def get_working_model():
-    # List of models to try in order of preference
-    candidates = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-001",
-        "gemini-1.5-pro",
-        "gemini-1.5-pro-001",
-        "gemini-1.0-pro",
-        "gemini-pro"
-    ]
-    
-    # 1. Try specific candidates
-    for name in candidates:
+def get_model():
+    model_options = ["gemini-3-flash-preview", "gemini-1.5-flash", "gemini-pro"]
+    for m in model_options:
         try:
-            model = genai.GenerativeModel(name)
-            # Dry run to check if it actually connects
-            model.generate_content("test", request_options={"timeout": 5})
-            print(f"✅ Connected to: {name}")
+            model = genai.GenerativeModel(m)
+            # Simple test to ensure it works
+            model.generate_content("test")
             return model
-        except Exception as e:
-            print(f"⚠️ {name} failed, trying next...")
-            continue
-            
-    # 2. If all else fails, use the generic fallback
-    return genai.GenerativeModel("gemini-1.5-flash")
+        except: continue
+    return genai.GenerativeModel("gemini-pro")
 
-model = get_working_model()
+model = get_model()
 
 # ================== 🧠 SHARED REAL-TIME MEMORY ==================
 @st.cache_resource
