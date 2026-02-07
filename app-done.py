@@ -18,12 +18,35 @@ except:
 
 genai.configure(api_key=API_KEY)
 
-# 🛠️ MODEL SELECTOR
+# 🛠️ ROBUST MODEL SELECTOR (THE FIX)
 @st.cache_resource
-def get_model():
+def get_working_model():
+    # List of models to try in order of preference
+    candidates = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-001",
+        "gemini-1.0-pro",
+        "gemini-pro"
+    ]
+    
+    # 1. Try specific candidates
+    for name in candidates:
+        try:
+            model = genai.GenerativeModel(name)
+            # Dry run to check if it actually connects
+            model.generate_content("test", request_options={"timeout": 5})
+            print(f"✅ Connected to: {name}")
+            return model
+        except Exception as e:
+            print(f"⚠️ {name} failed, trying next...")
+            continue
+            
+    # 2. If all else fails, use the generic fallback
     return genai.GenerativeModel("gemini-1.5-flash")
 
-model = get_model()
+model = get_working_model()
 
 # ================== 🧠 SHARED REAL-TIME MEMORY ==================
 @st.cache_resource
