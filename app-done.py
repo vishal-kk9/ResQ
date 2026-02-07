@@ -11,24 +11,20 @@ import overpy
 from geopy.distance import geodesic
 
 # ================== CONFIGURATION ==================
-# 1. SETUP API KEY (Safe for both Cloud and Local)
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    # Fallback if you are running locally and haven't set up secrets.toml
-    # You can paste your key here for local testing if needed
-    API_KEY = "PASTE_YOUR_KEY_HERE_IF_LOCAL" 
+    API_KEY = "YOUR_NEW_KEY_HERE" 
 
 genai.configure(api_key=API_KEY)
 
-# 🛠️ MODEL SELECTOR (YOUR CUSTOM CODE)
+# 🛠️ MODEL SELECTOR
 @st.cache_resource
 def get_model():
-    model_options = ["gemini-3-flash-preview", "gemini-1.5-flash", "gemini-pro"]
+    model_options = ["gemini-1.5-flash", "gemini-3-flash-preview", "gemini-pro"]
     for m in model_options:
         try:
             model = genai.GenerativeModel(m)
-            # Simple test to ensure it works
             model.generate_content("test")
             return model
         except: continue
@@ -51,7 +47,7 @@ class SharedSystemState:
         }
         
         self.mission = {
-            "status": "IDLE", # IDLE -> PENDING -> ACTIVE (or DECLINED)
+            "status": "IDLE", 
             "target_hospital": None,
             "patient_data": None,
             "ai_analysis": None,
@@ -152,14 +148,26 @@ def find_best_hospital(required_ward):
         elif required_ward == "OP" and data["op_beds"] > 0: eligible.append((name, data))
     return sorted(eligible, key=lambda x: x[1]['dist'])
 
+def safe_int(val):
+    try:
+        return int(val)
+    except:
+        return 0
+
 # ================== PAGE 1: AMBULANCE COMMAND ==================
 if page == "🚑 EMS UNIT (AMBULANCE)":
 
     # 1. CHECK IF WE ARE ALREADY ACTIVE (NAVIGATION MODE)
     if system.mission["status"] == "ACTIVE":
         dest_name = system.mission['target_hospital']
-        dest_data = system.hospitals[dest_name]
-        
+        # SAFETY CHECK: Ensure hospital still exists in current list
+        if dest_name in system.hospitals:
+            dest_data = system.hospitals[dest_name]
+        else:
+            # Fallback if list reset
+            dest_data = list(system.hospitals.values())[0]
+            dest_name = list(system.hospitals.keys())[0]
+
         st.markdown(f"# 🚑 CODE 3 TRANSPORT: {dest_name}")
         st.success("✅ ADMISSION AUTHORIZED - UNIT MOBILIZED")
         
@@ -180,8 +188,9 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         
         vc1, vc2, vc3, vc4 = st.columns(4)
         with vc1: new_bp = st.text_input("BP (mmHg)", value=system.mission["live_vitals"]["bp"])
-        with vc2: new_hr = st.number_input("Heart Rate (BPM)", value=system.mission["live_vitals"]["hr"])
-        with vc3: new_spo2 = st.number_input("SpO2 (%)", value=system.mission["live_vitals"]["spo2"])
+        # FIXED CRASH HERE: Using safe_int to prevent N/A error
+        with vc2: new_hr = st.number_input("Heart Rate (BPM)", value=safe_int(system.mission["live_vitals"]["hr"]))
+        with vc3: new_spo2 = st.number_input("SpO2 (%)", value=safe_int(system.mission["live_vitals"]["spo2"]))
         with vc4:
             st.write("") 
             st.write("") 
@@ -225,14 +234,13 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         st.title("❌ ADMISSION DENIED: DIVERSION REQUIRED")
         st.error(f"{system.mission['target_hospital']} reports ZERO CAPACITY. Initiate Diversion Protocol.")
         if st.button("🔄 INITIATE DIVERSION (SELECT ALTERNATE)", type="primary"):
-            system.mission["status"] = "IDLE" # Go back to list
+            system.mission["status"] = "IDLE" 
             st.rerun()
 
     # 4. INITIAL STATE: DIAGNOSTICS & SELECTION
     else:
         st.title("🚑 ResQ PRE-HOSPITAL ASSESSMENT")
         
-        # --- GPS BUTTON ---
         col_gps, col_info = st.columns([1, 2])
         with col_gps:
             st.caption("📍 GET REAL-TIME LOCATION")
@@ -328,7 +336,6 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
             st.markdown("### 🏥 SELECT DESTINATION FACILITY")
             hospitals = find_best_hospital(r["ward_need"])
             
-            # MAP
             map_pts = []
             map_pts.append({"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "color": "#ff0000", "size": 20})
             for name, data in hospitals:
@@ -363,7 +370,13 @@ else:
         st.success(f"🚑 ACTIVE INBOUND: {system.mission['patient_data']['name'].upper()}")
         st.subheader("📍 INBOUND UNIT TRACKING")
         target_hosp = system.mission["target_hospital"]
-        h_data = system.hospitals[target_hosp]
+        
+        # FIXED: Ensure we fetch the latest data for the selected hospital
+        if target_hosp in system.hospitals:
+            h_data = system.hospitals[target_hosp]
+        else:
+            h_data = list(system.hospitals.values())[0]
+
         map_data = pd.DataFrame([
             {"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "type": "🚑 UNIT", "size": 20, "color": "#ff0000"}, 
             {"lat": h_data['lat'], "lon": h_data['lon'], "type": "🏥 HOSPITAL", "size": 20, "color": "#00ff00"} 
