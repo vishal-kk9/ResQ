@@ -6,14 +6,14 @@ import time
 import json
 import os
 import random
-from streamlit_geolocation import streamlit_geolocation # New Library
+from streamlit_geolocation import streamlit_geolocation
+import overpy
+from geopy.distance import geodesic
 
 # ================== CONFIGURATION ==================
-# This reads the key from the secure cloud settings (Fixes the 403 Error)
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    # If running locally without secrets.toml, put your NEW key here temporarily
     API_KEY = "YOUR_NEW_KEY_HERE" 
 
 genai.configure(api_key=API_KEY)
@@ -29,16 +29,16 @@ model = get_model()
 @st.cache_resource
 class SharedSystemState:
     def __init__(self):
-        # Default: San Francisco (Overwritten if GPS is used)
-        self.base_lat = 37.7749
-        self.base_lon = -122.4194
+        self.base_lat = 11.0168 # Default (e.g., Coimbatore)
+        self.base_lon = 76.9558
         self.gps_locked = False
         
+        # Default Mock Hospitals (Fallback)
         self.hospitals = {
-            "City General Trauma": {"specialty": "Level 1 Trauma", "dist": 5, "icu_beds": 2, "op_beds": 15, "lat": 37.7749, "lon": -122.4194},
-            "Metropolitan Heart": {"specialty": "Cardiology Center", "dist": 12, "icu_beds": 8, "op_beds": 5, "lat": 37.7849, "lon": -122.4094},
-            "Suburban Clinic": {"specialty": "General Care", "dist": 3, "icu_beds": 0, "op_beds": 20, "lat": 37.7649, "lon": -122.4294}
+            "City General Trauma": {"specialty": "Level 1 Trauma", "dist": 5.2, "icu_beds": 2, "op_beds": 15, "lat": 11.0200, "lon": 76.9600},
+            "Metropolitan Heart": {"specialty": "Cardiology Center", "dist": 8.5, "icu_beds": 8, "op_beds": 5, "lat": 11.0300, "lon": 76.9700},
         }
+        
         self.mission = {
             "status": "IDLE", 
             "target_hospital": None,
@@ -46,7 +46,7 @@ class SharedSystemState:
             "ai_analysis": None,
             "live_vitals": {"bp": "120/80", "hr": 80, "spo2": 98},
             "telemetry_alert": "Stable",
-            "ambulance_loc": {"lat": 37.7600, "lon": -122.4200} 
+            "ambulance_loc": {"lat": 11.0168, "lon": 76.9558} 
         }
         self.declined_hospitals = []
 
@@ -55,19 +55,51 @@ class SharedSystemState:
             self.hospitals[hospital_name]["icu_beds"] -= 1
         else:
             self.hospitals[hospital_name]["op_beds"] -= 1
+
+    # 🌍 REAL-WORLD HOSPITAL FETCHING
+    def fetch_real_hospitals(self, lat, lon):
+        if self.gps_locked: return # Don't spam the API if already locked
+        
+        api = overpy.Overpass()
+        # Query: Find hospitals within 5000m (5km) of the user
+        query = f"""
+            [out:json];
+            node["amenity"="hospital"](around:5000, {lat}, {lon});
+            out 5;
+        """
+        try:
+            result = api.query(query)
+            new_hospitals = {}
             
-    # Relocate hospitals to be near the user's real GPS
-    def relocate_hospitals(self, user_lat, user_lon):
-        if not self.gps_locked:
-            self.base_lat = user_lat
-            self.base_lon = user_lon
-            # Move hospitals to random spots around the user (approx 2-5km away)
-            offsets = [(0.02, 0.01), (-0.02, -0.02), (0.01, -0.03)]
-            keys = list(self.hospitals.keys())
-            for i, key in enumerate(keys):
-                self.hospitals[key]["lat"] = user_lat + offsets[i][0]
-                self.hospitals[key]["lon"] = user_lon + offsets[i][1]
-            self.gps_locked = True
+            # Process up to 5 nearest hospitals
+            for node in result.nodes[:5]:
+                name = node.tags.get("name", "Unknown Medical Center")
+                h_lat = float(node.lat)
+                h_lon = float(node.lon)
+                
+                # Calculate real distance
+                dist = round(geodesic((lat, lon), (h_lat, h_lon)).km, 1)
+                
+                # Randomize mock bed data (since real APIs don't share bed counts publicly)
+                new_hospitals[name] = {
+                    "specialty": "General / Emergency",
+                    "dist": dist,
+                    "icu_beds": random.randint(0, 5),
+                    "op_beds": random.randint(5, 20),
+                    "lat": h_lat,
+                    "lon": h_lon
+                }
+            
+            if new_hospitals:
+                self.hospitals = new_hospitals
+                self.base_lat = lat
+                self.base_lon = lon
+                self.gps_locked = True
+                return True
+        except Exception as e:
+            print(f"OSM Error: {e}")
+            return False
+        return False
 
 system = SharedSystemState()
 
@@ -100,12 +132,11 @@ with st.sidebar:
     st.divider()
     st.header("📡 SYSTEM STATUS")
     
-    # --- 🛰️ GPS STATUS ---
     if system.gps_locked:
-        st.success("🟢 GPS SIGNAL: LOCKED")
-        st.caption(f"Lat: {system.base_lat:.4f}, Lon: {system.base_lon:.4f}")
+        st.success("🌍 REAL-WORLD DATA: ACTIVE")
+        st.caption(f"Searching near: {system.base_lat:.4f}, {system.base_lon:.4f}")
     else:
-        st.warning("🟠 GPS: SEARCHING...")
+        st.warning("⚠️ MODE: SIMULATION (Click GPS to Go Live)")
     
     st.divider()
     page = st.radio("SELECT INTERFACE", ["🚑 EMS UNIT (AMBULANCE)", "🏥 MEDICAL COMMAND (HOSPITAL)"])
@@ -136,7 +167,7 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         dest_name = system.mission['target_hospital']
         dest_data = system.hospitals[dest_name]
         
-        st.markdown(f"# 🚑 CODE 3 TRANSPORT: {dest_name.upper()}")
+        st.markdown(f"# 🚑 CODE 3 TRANSPORT: {dest_name}")
         st.success("✅ ADMISSION AUTHORIZED - UNIT MOBILIZED")
         
         c1, c2, c3 = st.columns(3)
@@ -144,7 +175,6 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         c2.metric("RANGE", f"{dest_data['dist']} km")
         c3.metric("STATUS", "EN ROUTE")
 
-        # --- 🗺️ LIVE GPS MAP ---
         st.subheader("📍 LIVE GPS TRACKING")
         map_data = pd.DataFrame([
             {"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "type": "🚑 AMBULANCE", "size": 20, "color": "#ff0000"}, 
@@ -156,12 +186,9 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         st.subheader("📡 LIVE PATIENT TELEMETRY")
         
         vc1, vc2, vc3, vc4 = st.columns(4)
-        with vc1:
-            new_bp = st.text_input("BP (mmHg)", value=system.mission["live_vitals"]["bp"])
-        with vc2:
-            new_hr = st.number_input("Heart Rate (BPM)", value=system.mission["live_vitals"]["hr"])
-        with vc3:
-            new_spo2 = st.number_input("SpO2 (%)", value=system.mission["live_vitals"]["spo2"])
+        with vc1: new_bp = st.text_input("BP (mmHg)", value=system.mission["live_vitals"]["bp"])
+        with vc2: new_hr = st.number_input("Heart Rate (BPM)", value=system.mission["live_vitals"]["hr"])
+        with vc3: new_spo2 = st.number_input("SpO2 (%)", value=system.mission["live_vitals"]["spo2"])
         with vc4:
             st.write("") 
             st.write("") 
@@ -178,8 +205,7 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                         system.mission["telemetry_alert"] = resp.text
                         st.toast("✅ Vitals & Analysis Sent to Hospital", icon="📡")
                         st.rerun()
-                    except:
-                        st.error("AI Re-evaluation failed.")
+                    except: st.error("AI Re-evaluation failed.")
         
         if system.mission["telemetry_alert"] != "Stable":
              st.info(f"**AI LIVE MONITOR:** {system.mission['telemetry_alert']}")
@@ -203,24 +229,31 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
     else:
         st.title("🚑 ResQ PRE-HOSPITAL ASSESSMENT")
         
-        # --- 🛰️ GEOLOCATION BUTTON ---
+        # --- 🛰️ GEOLOCATION & REAL DATA FETCH ---
         col_gps, col_info = st.columns([1, 2])
         with col_gps:
-            st.caption("📍 ACQUIRE SATELLITE FIX")
+            st.caption("📍 GET REAL-TIME LOCATION")
             location = streamlit_geolocation()
             
-            # If GPS found, update system coordinates
             if location and location['latitude'] is not None:
                 if not system.gps_locked:
-                    system.relocate_hospitals(location['latitude'], location['longitude'])
-                    system.mission["ambulance_loc"] = {"lat": location['latitude'], "lon": location['longitude']}
-                    st.rerun()
+                    with st.spinner("📡 SCANNING SATELLITE & FINDING LOCAL HOSPITALS..."):
+                        # Fetch REAL hospitals from OpenStreetMap
+                        success = system.fetch_real_hospitals(location['latitude'], location['longitude'])
+                        system.mission["ambulance_loc"] = {"lat": location['latitude'], "lon": location['longitude']}
+                        if success:
+                            st.success("✅ LOCAL HOSPITALS FOUND!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ Network Error: Using Simulation Mode")
         
         with col_info:
             if system.gps_locked:
-                 st.success(f"✅ LOCATION CONFIRMED: {system.base_lat:.4f}, {system.base_lon:.4f}")
+                 st.success(f"✅ GPS LOCKED: {system.base_lat:.4f}, {system.base_lon:.4f}")
+                 st.caption("Showing REAL hospitals within 5km radius.")
             else:
-                 st.info("⚠️ Using Default Triangulation (San Francisco). Click above for Real GPS.")
+                 st.info("⚠️ Click the button to fetch REAL hospitals near you.")
 
         st.divider()
         c1, c2 = st.columns([1, 2])
@@ -249,10 +282,8 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
         notes = st.text_area("🎙️ CLINICAL NOTES / OBSERVATIONS", height=100, placeholder="e.g., Diaphoresis, chest pain radiating to left arm...")
         
         col_act, col_upl = st.columns([1,1])
-        with col_upl:
-            st.file_uploader("📸 UPLOAD TRAUMA IMAGING", type=["jpg", "png"], label_visibility="collapsed")
-        with col_act:
-            analyze_btn = st.button("⚡ EXECUTE CLINICAL DIAGNOSTICS", type="primary")
+        with col_upl: st.file_uploader("📸 UPLOAD TRAUMA IMAGING", type=["jpg", "png"], label_visibility="collapsed")
+        with col_act: analyze_btn = st.button("⚡ EXECUTE CLINICAL DIAGNOSTICS", type="primary")
 
         if analyze_btn:
             if not notes:
@@ -295,20 +326,18 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
             with c1:
                 st.markdown(f"**SEVERITY INDEX**: :{color}[**{sev}/10**]")
                 st.metric("REQUIRED UNIT", r['ward_need'])
-            with c2:
-                st.info(f"**AI ASSESSMENT:**\n\n{r['reason']}", icon="🩺")
+            with c2: st.info(f"**AI ASSESSMENT:**\n\n{r['reason']}", icon="🩺")
             
-            st.markdown("### 🏥 AVAILABLE FACILITIES (NEARBY)")
+            st.markdown("### 🏥 AVAILABLE FACILITIES (REAL-TIME)")
             hospitals = find_best_hospital(r["ward_need"])
             
-            # --- 🗺️ SHOW HOSPITALS ON MAP (RELATIVE TO USER) ---
             map_pts = []
             map_pts.append({"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "color": "#ff0000", "size": 20})
             for name, data in hospitals:
                  map_pts.append({"lat": data["lat"], "lon": data["lon"], "color": "#0000ff", "size": 15})
             st.map(pd.DataFrame(map_pts), color="color", size="size", zoom=12)
 
-            if not hospitals: st.error("🚨 CRITICAL: NO CAPACITY IN NETWORK")
+            if not hospitals: st.error("🚨 CRITICAL: NO HOSPITALS FOUND NEARBY")
             
             for name, data in hospitals:
                 with st.container():
