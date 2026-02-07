@@ -21,7 +21,7 @@ genai.configure(api_key=API_KEY)
 # 🛠️ MODEL SELECTOR
 @st.cache_resource
 def get_model():
-    return genai.GenerativeModel("gemini-pro")
+    return genai.GenerativeModel("gemini-1.5-flash")
 
 model = get_model()
 
@@ -29,7 +29,7 @@ model = get_model()
 @st.cache_resource
 class SharedSystemState:
     def __init__(self):
-        self.base_lat = 11.0168 # Default (e.g., Coimbatore)
+        self.base_lat = 11.0168 
         self.base_lon = 76.9558
         self.gps_locked = False
         
@@ -40,7 +40,7 @@ class SharedSystemState:
         }
         
         self.mission = {
-            "status": "IDLE", 
+            "status": "IDLE", # IDLE -> PENDING -> ACTIVE (or DECLINED)
             "target_hospital": None,
             "patient_data": None,
             "ai_analysis": None,
@@ -61,26 +61,20 @@ class SharedSystemState:
         if self.gps_locked: return # Don't spam the API if already locked
         
         api = overpy.Overpass()
-        # Query: Find hospitals within 5000m (5km) of the user
         query = f"""
             [out:json];
-            node["amenity"="hospital"](around:5000, {lat}, {lon});
+            node["amenity"="hospital"](around:10000, {lat}, {lon});
             out 5;
         """
         try:
             result = api.query(query)
             new_hospitals = {}
-            
-            # Process up to 5 nearest hospitals
             for node in result.nodes[:5]:
                 name = node.tags.get("name", "Unknown Medical Center")
                 h_lat = float(node.lat)
                 h_lon = float(node.lon)
-                
-                # Calculate real distance
                 dist = round(geodesic((lat, lon), (h_lat, h_lon)).km, 1)
                 
-                # Randomize mock bed data (since real APIs don't share bed counts publicly)
                 new_hospitals[name] = {
                     "specialty": "General / Emergency",
                     "dist": dist,
@@ -97,7 +91,6 @@ class SharedSystemState:
                 self.gps_locked = True
                 return True
         except Exception as e:
-            print(f"OSM Error: {e}")
             return False
         return False
 
@@ -134,9 +127,8 @@ with st.sidebar:
     
     if system.gps_locked:
         st.success("🌍 REAL-WORLD DATA: ACTIVE")
-        st.caption(f"Searching near: {system.base_lat:.4f}, {system.base_lon:.4f}")
     else:
-        st.warning("⚠️ MODE: SIMULATION (Click GPS to Go Live)")
+        st.warning("⚠️ MODE: SIMULATION")
     
     st.divider()
     page = st.radio("SELECT INTERFACE", ["🚑 EMS UNIT (AMBULANCE)", "🏥 MEDICAL COMMAND (HOSPITAL)"])
@@ -152,18 +144,8 @@ def find_best_hospital(required_ward):
 # ================== PAGE 1: AMBULANCE COMMAND ==================
 if page == "🚑 EMS UNIT (AMBULANCE)":
 
-    # --- STATE 1: WAITING ---
-    if system.mission["status"] == "PENDING":
-        st.title("🚑 TRANSFER REQUEST INITIATED")
-        st.markdown(f"### ⏳ AWAITING ADMISSION AUTH: {system.mission['target_hospital'].upper()}")
-        st.info("Medical Command Center notified. Standby for handshake protocol.")
-        
-        with st.spinner("Establishing secure telemetry link..."):
-            time.sleep(2) 
-            st.rerun()
-
-    # --- STATE 2: ACTIVE (EN ROUTE) ---
-    elif system.mission["status"] == "ACTIVE":
+    # 1. CHECK IF WE ARE ALREADY ACTIVE (NAVIGATION MODE)
+    if system.mission["status"] == "ACTIVE":
         dest_name = system.mission['target_hospital']
         dest_data = system.hospitals[dest_name]
         
@@ -217,41 +199,46 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
             st.session_state.analysis_result = None
             st.rerun()
 
-    # --- STATE 3: DECLINED ---
+    # 2. CHECK IF WE ARE WAITING FOR HOSPITAL RESPONSE
+    elif system.mission["status"] == "PENDING":
+        st.title("🚑 TRANSFER REQUEST INITIATED")
+        st.markdown(f"### ⏳ AWAITING ADMISSION AUTH: {system.mission['target_hospital'].upper()}")
+        st.info("Medical Command Center notified. Standby for handshake protocol.")
+        
+        with st.spinner("Establishing secure telemetry link..."):
+            time.sleep(2) 
+            st.rerun()
+
+    # 3. CHECK IF WE WERE DECLINED
     elif system.mission["status"] == "DECLINED":
         st.title("❌ ADMISSION DENIED: DIVERSION REQUIRED")
         st.error(f"{system.mission['target_hospital']} reports ZERO CAPACITY. Initiate Diversion Protocol.")
         if st.button("🔄 INITIATE DIVERSION (SELECT ALTERNATE)", type="primary"):
-            system.mission["status"] = "IDLE"
+            system.mission["status"] = "IDLE" # Go back to list
             st.rerun()
 
-    # --- STATE 4: TRIAGE ---
+    # 4. INITIAL STATE: DIAGNOSTICS & SELECTION
     else:
         st.title("🚑 ResQ PRE-HOSPITAL ASSESSMENT")
         
-        # --- 🛰️ GEOLOCATION & REAL DATA FETCH ---
+        # --- GPS BUTTON ---
         col_gps, col_info = st.columns([1, 2])
         with col_gps:
             st.caption("📍 GET REAL-TIME LOCATION")
             location = streamlit_geolocation()
-            
             if location and location['latitude'] is not None:
                 if not system.gps_locked:
                     with st.spinner("📡 SCANNING SATELLITE & FINDING LOCAL HOSPITALS..."):
-                        # Fetch REAL hospitals from OpenStreetMap
                         success = system.fetch_real_hospitals(location['latitude'], location['longitude'])
                         system.mission["ambulance_loc"] = {"lat": location['latitude'], "lon": location['longitude']}
                         if success:
                             st.success("✅ LOCAL HOSPITALS FOUND!")
                             time.sleep(1)
                             st.rerun()
-                        else:
-                            st.warning("⚠️ Network Error: Using Simulation Mode")
         
         with col_info:
             if system.gps_locked:
                  st.success(f"✅ GPS LOCKED: {system.base_lat:.4f}, {system.base_lon:.4f}")
-                 st.caption("Showing REAL hospitals within 5km radius.")
             else:
                  st.info("⚠️ Click the button to fetch REAL hospitals near you.")
 
@@ -264,7 +251,6 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                 patient = emr_database.get(pid, {})
                 if patient:
                     st.success(f"**EHR FOUND:** {patient['name']} (Age: {patient['age']})")
-                    st.caption(f"Hx: {patient['history']} | Allergies: {patient['allergies']}")
                 else:
                     st.warning("Patient ID not found in Local Database.")
                     patient = None
@@ -315,7 +301,7 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                     except Exception as e:
                         st.error(f"AI ERROR: {e}")
 
-        # --- RESULTS ---
+        # --- SHOW HOSPITALS ONLY AFTER DIAGNOSIS ---
         if st.session_state.analysis_result:
             r = st.session_state.analysis_result
             st.divider()
@@ -328,9 +314,10 @@ if page == "🚑 EMS UNIT (AMBULANCE)":
                 st.metric("REQUIRED UNIT", r['ward_need'])
             with c2: st.info(f"**AI ASSESSMENT:**\n\n{r['reason']}", icon="🩺")
             
-            st.markdown("### 🏥 AVAILABLE FACILITIES (REAL-TIME)")
+            st.markdown("### 🏥 SELECT DESTINATION FACILITY")
             hospitals = find_best_hospital(r["ward_need"])
             
+            # MAP
             map_pts = []
             map_pts.append({"lat": system.mission["ambulance_loc"]["lat"], "lon": system.mission["ambulance_loc"]["lon"], "color": "#ff0000", "size": 20})
             for name, data in hospitals:
